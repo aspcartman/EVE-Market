@@ -1,11 +1,15 @@
 import eve
 import sys
 from termcolor import colored, cprint
-# Import graphviz
-import networkx as nx
+# import graphviz
+# import networkx as nx
 # import matplotlib.pyplot as plt
 
-
+# Import pygraph
+from pygraph.classes.graph import graph
+from pygraph.classes.digraph import digraph
+from pygraph.algorithms.searching import breadth_first_search
+from pygraph.readwrite.dot import write
 
 def main():
     db = eve.DatabaseDelegate()
@@ -36,6 +40,14 @@ def main():
 
     # nx.draw(G)
     # plt.savefig("path.png")
+
+    # g = graph()
+    # g.add_nodes_from(db.getAllSS)
+    # g.add_edges_from(db.getAllSSEdges)
+
+    # shortest_path(graph, solarSystemID)
+
+    
 
     # text = colored('Hello, World!', 'red')
     # print(text)

@@ -2,10 +2,15 @@ import MySQLdb
 import sys
 from termcolor import colored, cprint
 
+
 # Import pygraph
 from pygraph.classes.graph import graph
 from pygraph.algorithms.filters.radius import radius
 from pygraph.algorithms.searching import breadth_first_search
+from pygraph.algorithms.minmax import shortest_path
+
+
+from texttable import *
 
 # Import for benchmark
 # from time import clock
@@ -46,6 +51,26 @@ def printByLineD(dict):
     for x in dict:
         print "%s: %s" % (x,dict[x])
 
+# Dictionary Categories
+def containsAllKeys(dictionary,keys):
+    if all (k in dictionary for k in keys):
+        return True
+    else:
+        return False
+
+def selectByKeys(dictionary,keys):
+    result = {}
+    for key in keys:
+        result[key] = dictionary[key]
+    return result
+
+def colorRate(rate):
+        if rate > 0.5:
+            return 'green'   
+        else:  
+             return 'red'
+
+
 class Deal(object):
     typeID = 0
     profit = 0
@@ -53,29 +78,40 @@ class Deal(object):
     buySystem = 0
     sellSystem = 0
     volume = 0
-    name = ''
     rang = 1
 
-    def __init__(self,array,db):
+    typeInfo = 0
+    buySSInfo = 0
+    sellSSInfo = 0
+
+    def __init__(self,array,db): # typeID, profit, minPrice, startSS, stopSS
         self.typeID = array[0]
         self.profit = array[1]
         self.buyPrice = array[2]
         self.buySystem = array[3]
         self.sellSystem = array[4]
+        self.volume = db.getTypeInfo(self.typeID)[1]
 
-        buySSInfo = db.getSSInfo(self.buySystem)
-        sellSSInfo = db.getSSInfo(self.sellSystem)
-        typeInfo = db.getTypeInfo(self.typeID)
-
-
+        self.typeInfo = db.getTypeInfo(self.typeID)
+        self.buySSInfo = db.getSSInfo(self.buySystem)
+        self.sellSSInfo = db.getSSInfo(self.sellSystem)
 
     def __str__(self):
-        return '%d\t%s (%dm3) \t %dISK : %dISK \t ' % (self.typeID, self.name, self.volume,self.buy, self.profit )
+        return '%d \t %s (%d m3) \t %dISK : %dISK \t %s(%.1f) ----> %s(%.1f) \t (DUNNO jumps)'\
+        % (self.typeID, self.typeInfo[0], self.typeInfo[1], self.buyPrice, self.profit, self.buySSInfo[1], self.buySSInfo[2], self.sellSSInfo[1], self.sellSSInfo[2])
+
+    def desc(self):
+        return (self.typeID, self.typeInfo[0], self.typeInfo[1], self.buyPrice, self.profit, self.buySSInfo[1], self.buySSInfo[2], self.sellSSInfo[1], self.sellSSInfo[2])
 
 
 class DatabaseDelegate(object):
     cursor = object()
-    qdt = 0 # Last query completion time
+    qdt = 0 # Last query dt
+    ssgraph = 0 # Solar System Graph
+
+    solarSystemsInfoCache = {}
+    typeInfoCache = {}
+    jumpsCache = {}
 
     def __init__(self):
         db = MySQLdb.connect(host="192.168.0.111", user="aspcartman", passwd="vicevice",db="EVE")
@@ -142,56 +178,81 @@ class DatabaseDelegate(object):
         text = colored(text, 'cyan')
         print "Done %s. %s" % ( self.qdt, text)
 
-        print "Generating profitable deals from this orders."
-        sqlQuery_forDeals = "CREATE TEMPORARY TABLE deals AS (SELECT `buyOrders`.`typeID`, SUM(`maxPrice` - `minPrice`) AS `profit`,`minPrice`, `startSolarSystem`,`endSolarSystem` \
+        print "Generating profitable deals from this orders." 
+        sqlQuery_forDeals = "SELECT `buyOrders`.`typeID`, SUM(`maxPrice` - `minPrice`) AS `profit`,`minPrice`, `startSolarSystem`,`endSolarSystem` \
                     FROM   `buyOrders`,`sellOrders`\
                     WHERE  `buyOrders`.`typeID` = `sellOrders`.`typeID`\
                     GROUP BY `typeID`,`startSolarSystem`,`endSolarSystem`\
-                    HAVING SUM(`maxPrice` - `minPrice`) > 0.025 * SUM(`minPrice`) && SUM(`maxPrice` - `minPrice`) > 100)" # May be we don't need second statement
-        result = self.runQueryR(sqlQuery_forDeals)
-        print "Done %s." % ( self.qdt )
-
-        print "Reading SQL data..."
-        sqlQuery_forDeals = "SELECT * FROM `deals`"
+                    HAVING SUM(`maxPrice` - `minPrice`) > 0.025 * SUM(`minPrice`) && SUM(`maxPrice` - `minPrice`) > 100" # May be we don't need second statement
         deals = self.runQueryR(sqlQuery_forDeals)
 
         text = "Got %d profitable deals!" % len(deals)
         text = colored(text, 'cyan')
         print "Done %s. %s" % (self.qdt, text)
 
-        print "Getting distinct types."
-        sqlQuery_forTypes = "SELECT DISTINCT `typeID` FROM `deals`"
-        typeIDs = self.runQueryR(sqlQuery_forTypes)
-        typeIDs = arrayOpen(typeIDs)
-        print "Done %s. Got %d types." % ( self.qdt, len(typeIDs) )
-        
         print "Droping temporary tables."
-        sqlQuery_forDrop = "DROP TABLE buyOrders,sellOrders,deals"
+        sqlQuery_forDrop = "DROP TABLE buyOrders,sellOrders"
         self.runQueryR(sqlQuery_forDrop)
         print "Done %s." % ( self.qdt )
-
-        print "Fetching good's info"
-        typesInfo = self.getTypesInfos(typeIDs)
-        print "Done."
-
-        print "Fetching solarsystem's info"
-        solarSystemsInfo = self.getSSsInfos(solarSystems)
-        printByLineD(solarSystemsInfo)
-        return result
         
+        print "Generating actual deals."
+        dt = clock()
+        actualDeals = []
+        for x in deals:
+            actualDeals.append(Deal(x,self))
+        dt = clock() - dt
+        print "Done %s." % dt
+
+
+
+        '%d \t %s (%d m3) \t %dISK : %dISK \t %s(%.1f) ----> %s(%.1f) \t (DUNNO jumps)'
+        table = Texttable()
+        table.set_deco(Texttable.HEADER)
+        table.set_cols_align(["r", "l", "c", "r", "r", "l", "l", "r"])
+        table.set_cols_width([6,53,12,12,12,45,45,2])
+        table.add_row(['TypeID','Name', 'Volume', 'Buy Price (ISK)', 'Profit (ISK)', 'Buy SS', 'Sell SS', 'J'])
+        table.set_cols_dtype(["t", "t", "t", "t", "t", "t", "t", "t"])
+        for x in actualDeals:
+            buyColor = colorRate(x.buySSInfo[2])   
+            buyText = '%s:%s (%.1f)' % (x.buySSInfo[0], x.buySSInfo[1], x.buySSInfo[2])
+            buyText = colored(buyText, buyColor)
+
+            sellColor = colorRate(x.sellSSInfo[2])   
+            sellText = '%s:%s (%.1f)' % (x.sellSSInfo[0], x.sellSSInfo[1], x.sellSSInfo[2])
+            sellText = colored(sellText, sellColor)
+
+            sTypeID = x.typeID
+            sTypeName = x.typeInfo[0]
+            sTypeVol = '%10.2f' % x.typeInfo[1]
+            sBuyPrice = '%d' % x.buyPrice
+            sProfit = '%d' % x.profit
+            sBuySS = '%s' % buyText
+            sSellSS = '%s' % sellText
+            sJump = '%d' % self.getJumpsBetweenSS(x.buySystem,x.sellSystem)
+            table.add_row([sTypeID, sTypeName, sTypeVol, sBuyPrice, sProfit, sBuySS, sSellSS, sJump])
+
+        print table.draw()
 
 # End Orders =========================================
 
 # Solar Systems ==============================
     def getSSInfo(self,solarSystemID): # (Region, Name, Security)
+        if solarSystemID in self.solarSystemsInfoCache:
+            return self.solarSystemsInfoCache[solarSystemID]
+
         sqlQuery = "SELECT `regionName`, `solarSystemName`, `security` \
                     FROM `mapSolarSystems`, `mapRegions`\
                     WHERE ((`solarSystemID` = %d) && (`mapSolarSystems`.`regionID` = `mapRegions`.`regionID`))" % solarSystemID
         data = self.runQueryR(sqlQuery)
         data = arrayOpen(data)
+
+        self.solarSystemsInfoCache[solarSystemID] = data
         return data
 
     def getSSsInfos(self,solarSystemIDs): # {SSID: (Region, Name, Security), ...}
+        if containsAllKeys(self.solarSystemsInfoCache, solarSystemIDs):
+            return selectByKeys(self.solarSystemsInfoCache, solarSystemIDs)
+
         sqlQuery = "SELECT `solarSystemID`, `regionName`, `solarSystemName`, `security` \
                     FROM `mapSolarSystems`, `mapRegions`\
                     WHERE ((`solarSystemID` IN (%s)) && (`mapSolarSystems`.`regionID` = `mapRegions`.`regionID`))" % solarSystemIDs
@@ -199,7 +260,7 @@ class DatabaseDelegate(object):
         result = {}
         for x in data:
             result[x[0]] = (x[1],x[2],x[3])
-
+        # self.solarSystemsInfoCache.update(result)
         return result
    
     def getSSAroundSS(self,solarSystemID,jumps):
@@ -215,12 +276,17 @@ class DatabaseDelegate(object):
         ssName = colored(ss[1],color)
         ssSecruity = colored('%.1f' % ss[2], color)
 
+        if (self.ssgraph):
+            gr = self.ssgraph
+        else:
+            gr = graph()
+            nodes = self.getAllSS()
+            gr.add_nodes(nodes)
+            for edge in self.getAllSSEdges():
+                gr.add_edge(edge)
+
         print "Searching for Solar Systems around %s: %s(%s) in %d jumps." % (ssRegion, ssName, ssSecruity, jumps)
-        nodes = self.getAllSS()
-        gr = graph()
-        gr.add_nodes(nodes)
-        for edge in self.getAllSSEdges():
-            gr.add_edge(edge)
+
         ssinrad = breadth_first_search(gr,solarSystemID,radius(jumps))
         ssinrad = ssinrad[1]
         
@@ -229,6 +295,26 @@ class DatabaseDelegate(object):
         print "Done. %s, including current one." % text
 
         return ssinrad
+
+    def getJumpsBetweenSS(self,ss1,ss2):
+        if ss1 in self.jumpsCache:
+            return self.jumpsCache[ss1][ss2]
+        if ss2 in self.jumpsCache:
+            return self.jumpsCache[ss2][ss1]
+
+        gr = 0
+        if (self.ssgraph):
+            gr = self.ssgraph
+        else:
+            gr = graph()
+            nodes = self.getAllSS()
+            gr.add_nodes(nodes)
+            for edge in self.getAllSSEdges():
+                gr.add_edge(edge)
+        
+        paths = shortest_path(gr,ss1)[1]
+        self.jumpsCache[ss1] = paths
+        return paths[ss2]
 
     def getAllSS(self):
         sqlQuery = "SELECT `solarSystemID` FROM `mapSolarSystems`"
@@ -244,10 +330,15 @@ class DatabaseDelegate(object):
 
 # Items ======================================
 
-    def getTypeInfo(self,typeID):
+    def getTypeInfo(self,typeID): # (typeName,volume)
+        if typeID in self.typeInfoCache:
+            return self.typeInfoCache[typeID]
+
         sqlQuery = "SELECT `typeName`,`volume` FROM `invTypes` WHERE `typeID` = %d" % typeID
         result = self.runQueryR(sqlQuery)
         result = arrayOpen(result)
+
+        self.typeInfoCache[typeID] = result
         return result
 
     def getTypesInfos(self,typeIDs): # {typeID:[typeName,volume]}
