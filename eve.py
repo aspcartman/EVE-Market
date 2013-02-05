@@ -8,8 +8,6 @@ from pygraph.classes.graph import graph
 from pygraph.algorithms.filters.radius import radius
 from pygraph.algorithms.searching import breadth_first_search
 from pygraph.algorithms.minmax import shortest_path
-
-
 from texttable import *
 
 # Import for benchmark
@@ -18,7 +16,7 @@ import datetime
 clock = datetime.datetime.now
 # bid = 0 - sell, can buy
 # bid = 1 - buy, can sell
-
+import padnums
 
 def arrayList(array): # ['a','b','c'] -> 'a,b,c'
     length = len(array)
@@ -64,44 +62,77 @@ def selectByKeys(dictionary,keys):
         result[key] = dictionary[key]
     return result
 
+# Color
 def colorRate(rate):
         if rate > 0.5:
             return 'green'   
         else:  
              return 'red'
 
+# Deals
 
 class Deal(object):
     typeID = 0
+    iBuyOrderID = 0 # Order to buy with
+    iSellOrderID = 0 # Order to sell to
+    iBuySSID = 0 # Where sell order is
+    iSellSSID = 0 # Where buy order is
     profit = 0
-    buyPrice = 0
-    buySystem = 0
-    sellSystem = 0
-    volume = 0
+    amount = 0
     rang = 1
 
     typeInfo = 0
-    buySSInfo = 0
-    sellSSInfo = 0
+    iBuySSInfo = 0 # SS where i buy
+    iSellSSInfo = 0 # SS where i sell
+    iBuyOrderInfo = 0
+    iSellOrderInfo = 0
+    jumps = 0
 
-    def __init__(self,array,db): # typeID, profit, minPrice, startSS, stopSS
+    def __init__(self,array,db): # typeID, sellOrderID, buyOrderID, sellSSID, buySSID, profit, amount
         self.typeID = array[0]
-        self.profit = array[1]
-        self.buyPrice = array[2]
-        self.buySystem = array[3]
-        self.sellSystem = array[4]
-        self.volume = db.getTypeInfo(self.typeID)[1]
+        self.iBuyOrderID = array[1] # Order to sell to
+        self.iSellOrderID = array[2] # Order to buy with
+        self.iBuySSID = array[3] # Where sell order is
+        self.iSellSSID = array[4] # Where buy order is
+        self.profit = array[5]
+        self.amount = array[6]
 
         self.typeInfo = db.getTypeInfo(self.typeID)
-        self.buySSInfo = db.getSSInfo(self.buySystem)
-        self.sellSSInfo = db.getSSInfo(self.sellSystem)
-
-    def __str__(self):
-        return '%d \t %s (%d m3) \t %dISK : %dISK \t %s(%.1f) ----> %s(%.1f) \t (DUNNO jumps)'\
-        % (self.typeID, self.typeInfo[0], self.typeInfo[1], self.buyPrice, self.profit, self.buySSInfo[1], self.buySSInfo[2], self.sellSSInfo[1], self.sellSSInfo[2])
-
+        self.iBuySSInfo = db.getSSInfo(self.iBuySSID)
+        self.iSellSSInfo = db.getSSInfo(self.iSellSSID)
+        self.iBuyOrderInfo = db.getOrderInfo(self.iBuyOrderID)
+        self.iSellOrderInfo = db.getOrderInfo(self.iSellOrderID)
+        self.jumps = db.getJumpsBetweenSS(self.iBuySSID,self.iSellSSID)
+    # def __repr__(self):
+    #     return '%d' % (self.typeID)
+    # def __str__(self):
+    #     return '%d \t %s (%d m3) \t %d \t %s(%.1f) ----> %s(%.1f) \t (%d jumps)'\
+    #     % self.desc()
+    
     def desc(self):
-        return (self.typeID, self.typeInfo[0], self.typeInfo[1], self.buyPrice, self.profit, self.buySSInfo[1], self.buySSInfo[2], self.sellSSInfo[1], self.sellSSInfo[2])
+        # print         self.iSellOrderInfo
+        return [self.typeInfo[0],
+        self.amount,
+        self.typeInfo[1]*self.amount, 
+        self.iBuyOrderInfo[1]*self.amount, 
+        self.profit*self.amount, 
+        self.profit / float(self.iBuyOrderInfo[1]) * 100,
+        self.iSellOrderInfo[1]*self.amount, 
+        self.iBuySSInfo[1], self.iBuySSInfo[2], 
+        self.iSellSSInfo[1], self.iSellSSInfo[2], self.jumps]
+    
+    @staticmethod
+    def printDeals(deals):
+        table = map(lambda x: x.desc(),deals)
+        for entry in table:
+            entry[4] = "%d (%.1f)" % (entry[4],entry[5])
+            entry[7] = "%s (%.1f)" % (entry[7],entry[8])
+            entry[9] = "%s (%.1f)" % (entry[9],entry[10])
+            del entry[5]
+            del entry[7]
+            del entry[8]
+        table.insert(0,("TYPE","AMOUNT","VOLUME","BUY PRICE","PROFIT","SELL PRICE","BUY","SELL","JUMPS"))
+        padnums.pprint_table(sys.stdout,table)
 
 
 class DatabaseDelegate(object):
@@ -112,8 +143,10 @@ class DatabaseDelegate(object):
     solarSystemsInfoCache = {}
     typeInfoCache = {}
     jumpsCache = {}
+    ordersInfoCache = {}
 
     def __init__(self):
+        # db = MySQLdb.connect(host="aspcart.hopto.org", user="tkorchagin", passwd="78789898",db="EVE")   
         db = MySQLdb.connect(host="192.168.0.111", user="aspcartman", passwd="vicevice",db="EVE")
         self.cursor = db.cursor()
 
@@ -128,112 +161,109 @@ class DatabaseDelegate(object):
         sqlQuery = "DELETE FROM emdrOrders WHERE DATEDIFF(CURDATE(),`generatedAt`) > 1"
         self.runQueryR(sqlQuery)
 
-# Orders =========================================
+# Orders ========================================
 
-    def getBuyOrdersAroundSSForItem(self,typeID,solarSystemID): #Founds every buy order around a solarSystem
-        sqlQuery = "SELECT `orderID`,`price`,`solarSystemID` FROM  `emdrOrders` WHERE (`typeID` = %d && `solarSystemID` != %d && `bid` = 1) ORDER BY `price` DESC" % (typeID,solarSystemID)
-        data = self.runQueryR(sqlQuery)
-        return data
+    def getOrderInfo(self,orderID):
+        if orderID in self.ordersInfoCache:
+            return self.ordersInfoCache[orderID]
 
-    def getBuyOrdersInSSForItem(self,typeID,solarSystemID): #Founds every buy order in a solarSystem
-        sqlQuery = "SELECT `orderID`,`price`,`solarSystemID` FROM  `emdrOrders` WHERE (`typeID` = %d && `solarSystemID`  = %d && `bid` = 1) ORDER BY `price` DESC" % (typeID,solarSystemID)
-        data = self.runQueryR(sqlQuery)
-        return data
+        sqlQuery = "SELECT * FROM `emdrOrders` WHERE `orderID` = %d" % orderID
+        result = self.runQueryR(sqlQuery)
+        result = arrayOpen(result)
 
-    def getSellOrdersAroundSSForItem(self,typeID,solarSystemID): #Founds every sell order around a solarSystem
-        sqlQuery = "SELECT `orderID`,`price`,`solarSystemID` FROM  `emdrOrders` WHERE (`typeID` = %d && `solarSystemID` != %d && `bid` = 0) ORDER BY `price`" % (typeID,solarSystemID)
-        data = self.runQueryR(sqlQuery)
-        return data
+        self.ordersInfoCache[orderID] = result
+        return result
 
-    def getSellOrdersInSSForItem(self,typeID,solarSystemID): #Founds every sell order in a solarSystem
-        sqlQuery = "SELECT `orderID`,`price`,`solarSystemID` FROM  `emdrOrders` WHERE (`typeID` = %d && `solarSystemID`  = %d && `bid` = 0) ORDER BY `price`" % (typeID,solarSystemID)
-        data = self.runQueryR(sqlQuery)
-        return data
+# End Orders ====================================
 
-    def getAllOrdersInRadius(self,solarSystemID,radius): # Returns ( (typeID, profit, buyPrice, buySolarSystem, sellSolarSystem), ... )
-        self.removeOldRows()
-        solarSystems = arrayList(self.getSSAroundSS(solarSystemID,radius))
+# Deals =========================================
 
-        print "Searching for Max buy orders (to which we'll sell) in those systems. It may take a while..."
-        sqlQuery_forBuy = "CREATE TEMPORARY TABLE buyOrders AS (SELECT `orderID`, `typeID`, MAX(`price`) AS `maxPrice`, `solarSystemID` AS `endSolarSystem`\
-                            FROM `emdrOrders`\
-                            WHERE (`solarSystemID` IN (%s) && `BID` = 1)\
-                            GROUP BY `typeID`, `endSolarSystem`)" % solarSystems
-        sqlQuery_forCountInBuy = "SELECT Count(*) FROM buyOrders"
-        self.runQueryR(sqlQuery_forBuy)
+    def getDealsAroundSS(self,SS,radius):
+        solarSystems = self.getSSAroundSS(SS,radius)
+        print "Getting Sell Orders"
+        sqlSellOrders = "SELECT `orderID`,`typeID`,`price`,`volRemaining`, `solarSystemID`\
+                         FROM `emdrOrders`\
+                         WHERE `solarSystemID` IN (%s) AND `BID` = 0 AND `generatedAt` > ADDDATE(NOW(), INTERVAL -9 HOUR)\
+                         ORDER BY `typeID`,`price`" % arrayList(solarSystems)
+        sellOrders = list(self.runQueryR(sqlSellOrders))
+        sellOrders = map(lambda x: list(x), sellOrders)
+        print "Done in %s. %d" % (self.qdt,len(sellOrders))
 
-        text = "Found %d buy orders." %  self.runQueryR(sqlQuery_forCountInBuy)[0][0]
-        text = colored(text, 'cyan')
-        print "Done %s. %s" % ( self.qdt, text)
+        print "Getting Buy Orders"
+        sqlBuyOrders = " SELECT `orderID`,`typeID`,`price`,`volRemaining`, `solarSystemID`\
+                         FROM `emdrOrders`\
+                         WHERE `solarSystemID` IN (%s) AND `BID` = 1 AND `generatedAt` > ADDDATE(NOW(), INTERVAL -9 HOUR)\
+                         ORDER BY `typeID`,`price` DESC" % arrayList(solarSystems)
+        buyOrders = list(self.runQueryR(sqlBuyOrders))
+        buyOrders  = map(lambda x: list(x), buyOrders)
+        print "Done in %s. %d" % (self.qdt,len(buyOrders))
 
-        print "Searching for Min sell orders (which we are going to buy) in those systems. It may take a while..."
-        sqlQuery_forSell = "CREATE TEMPORARY TABLE sellOrders AS (SELECT `orderID`, `typeID`, MIN(`price`) AS `minPrice`, `solarSystemID` AS `startSolarSystem`\
-                            FROM `emdrOrders`\
-                            WHERE (`solarSystemID` IN (%s) && `BID` = 0)\
-                            GROUP BY `typeID`, `startSolarSystem`)" % solarSystems
-        sqlQuery_forCountInSell = "SELECT Count(*) FROM sellOrders"
-        self.runQueryR(sqlQuery_forSell)
+        print "Algorithm begin."
+        deals = []
+        log = []
+        header = ["OrderID","TypeID","Price","Amount","","OrderID","TypeID","Price","Amount","RESULT"]
+        log.append(header)
 
-        text = "Found %d sell orders." %  self.runQueryR(sqlQuery_forCountInSell)[0][0]
-        text = colored(text, 'cyan')
-        print "Done %s. %s" % ( self.qdt, text)
+        while (len(sellOrders) and len(buyOrders)):
+            so = sellOrders[0]
+            bo = buyOrders[0]
+            if (len(sellOrders) % 30 == 0):
+                log.append(['','','','','','','','','',''])
+                log.append(header)
 
-        print "Generating profitable deals from this orders." 
-        sqlQuery_forDeals = "SELECT `buyOrders`.`typeID`, SUM(`maxPrice` - `minPrice`) AS `profit`,`minPrice`, `startSolarSystem`,`endSolarSystem` \
-                    FROM   `buyOrders`,`sellOrders`\
-                    WHERE  `buyOrders`.`typeID` = `sellOrders`.`typeID`\
-                    GROUP BY `typeID`,`startSolarSystem`,`endSolarSystem`\
-                    HAVING SUM(`maxPrice` - `minPrice`) > 0.025 * SUM(`minPrice`) && SUM(`maxPrice` - `minPrice`) > 100" # May be we don't need second statement
-        deals = self.runQueryR(sqlQuery_forDeals)
+            logE = [so[0],so[1],so[2],so[3],"",bo[0],bo[1],bo[2],bo[3]]
 
-        text = "Got %d profitable deals!" % len(deals)
-        text = colored(text, 'cyan')
-        print "Done %s. %s" % (self.qdt, text)
+            if (so[1] < bo[1]):
+                del sellOrders[0]
+                res = "sItem < bItem"
+                logE.append(res)
+                log.append(logE)
+                continue
+            if (so[1] > bo[1]):
+                del buyOrders[0]
+                res = "sItem > bItem"
+                logE.append(res)
+                log.append(logE)
+                continue
 
-        print "Droping temporary tables."
-        sqlQuery_forDrop = "DROP TABLE buyOrders,sellOrders"
-        self.runQueryR(sqlQuery_forDrop)
-        print "Done %s." % ( self.qdt )
-        
-        print "Generating actual deals."
-        dt = clock()
-        actualDeals = []
-        for x in deals:
-            actualDeals.append(Deal(x,self))
-        dt = clock() - dt
-        print "Done %s." % dt
+            profit = bo[2] - so[2]
+            if (profit < so[2] * 0.05):
+                del sellOrders[0]
+                del buyOrders[0]
+                res = "unprofitable"
+                logE.append(res)
+                log.append(logE)
+                continue
+
+            res = "OK!"
+            logE.append(res)
+            log.append(logE)
+
+            amount = min(so[3], bo[3])
+            tmp = so[3] - bo[3]
+            if (tmp < 0):
+                del sellOrders[0]
+                bo[3] -= amount
+            elif (tmp > 0):
+                del buyOrders[0]
+                so[3] -= amount
+            else:
+                del sellOrders[0]
+                del buyOrders[0]
+
+            # typeID, sellOrderID, buyOrderID, iSellSSID, iBuySSID, profit, amount
+            myDeal = Deal([so[1],so[0],bo[0],bo[4],so[4],profit,amount],self)
+            deals.append(myDeal)
+
+            
+
+        padnums.pprint_table(sys.stdout,log)
+        print "Here we go, %d deals!" % len(deals)
+        Deal.printDeals(deals)
 
 
 
-        '%d \t %s (%d m3) \t %dISK : %dISK \t %s(%.1f) ----> %s(%.1f) \t (DUNNO jumps)'
-        table = Texttable()
-        table.set_deco(Texttable.HEADER)
-        table.set_cols_align(["r", "l", "c", "r", "r", "l", "l", "r"])
-        table.set_cols_width([6,53,12,12,12,45,45,2])
-        table.add_row(['TypeID','Name', 'Volume', 'Buy Price (ISK)', 'Profit (ISK)', 'Buy SS', 'Sell SS', 'J'])
-        table.set_cols_dtype(["t", "t", "t", "t", "t", "t", "t", "t"])
-        for x in actualDeals:
-            buyColor = colorRate(x.buySSInfo[2])   
-            buyText = '%s:%s (%.1f)' % (x.buySSInfo[0], x.buySSInfo[1], x.buySSInfo[2])
-            buyText = colored(buyText, buyColor)
-
-            sellColor = colorRate(x.sellSSInfo[2])   
-            sellText = '%s:%s (%.1f)' % (x.sellSSInfo[0], x.sellSSInfo[1], x.sellSSInfo[2])
-            sellText = colored(sellText, sellColor)
-
-            sTypeID = x.typeID
-            sTypeName = x.typeInfo[0]
-            sTypeVol = '%10.2f' % x.typeInfo[1]
-            sBuyPrice = '%d' % x.buyPrice
-            sProfit = '%d' % x.profit
-            sBuySS = '%s' % buyText
-            sSellSS = '%s' % sellText
-            sJump = '%d' % self.getJumpsBetweenSS(x.buySystem,x.sellSystem)
-            table.add_row([sTypeID, sTypeName, sTypeVol, sBuyPrice, sProfit, sBuySS, sSellSS, sJump])
-
-        print table.draw()
-
-# End Orders =========================================
+# End Deals =========================================
 
 # Solar Systems ==============================
     def getSSInfo(self,solarSystemID): # (Region, Name, Security)
@@ -345,43 +375,3 @@ class DatabaseDelegate(object):
         sqlQuery = "SELECT `typeID`, `typeName`, `volume` FROM `invTypes` WHERE `typeID` IN (%s)" % arrayList(typeIDs)
         data = self.runQueryR(sqlQuery)
         return data 
-
-    # Get all items, that has sell orders in current SS and buy surrounding ones
-    def getUrgentItems(self,solarSystemID,jumps):
-        ssAround = self.getSSAroundSS(solarSystemID,jumps)
-        #Should return all 
-        sqlQuery = "(SELECT DISTINCT `typeID` FROM `emdrOrders` WHERE (`typeID` IN \
-                    (SELECT DISTINCT `typeID` FROM `emdrOrders` WHERE (`solarSystemID` = %d && `BID` = 0))) AND (`solarSystemID` IN (%s) && `BID` = 1))"\
-                        % (solarSystemID,arrayList(ssAround))
-        data = self.runQueryR(sqlQuery)
-        data = arrayOpen(data)
-        return data
-
-    def getUrgentItemsWithSS(self,solarSystemID,jumps): # returns [(unicue typeIDs), (typeID, ssID), (typeID, ssID), ...]
-        ssAround = self.getSSAroundSS(solarSystemID,jumps)
-        #Should return all 
-        sqlQuery = "(SELECT DISTINCT `typeID`,`solarSystemID` FROM `emdrOrders` WHERE (`typeID` IN \
-                    (SELECT DISTINCT `typeID` FROM `emdrOrders` WHERE (`solarSystemID` = %d && `BID` = 0))) AND (`solarSystemID` IN (%s) && `BID` = 1))"\
-                        % (solarSystemID,arrayList(ssAround))
-        data = self.runQueryR(sqlQuery)
-        # [(typeID, typeID, ...), (typeID,solarSystemID), (typeID,solarSystemID), (typeID,solarSystemID) ...]
-        types = []
-        for element in data:
-            typeID = element[0]
-            if typeID not in types:
-                types.append(typeID)
-        data.insert(0,types)
-        return data
-
-
-    def getItemsNames(self,itemTypeIDs):
-        sqlQuery = "SELECT `typeID`,`typeName` FROM `invTypes` WHERE `typeID` IN (%s)" % arrayList(itemTypeIDs)
-        data = self.runQueryR(sqlQuery)
-        return data
-
-    def maxProfit1Item(self,typeID,buySS,sellSS):
-        sellOrders = self.getSellOrdersInSSForItem(typeID,buySS)
-        buyOrders = self.getBuyOrdersInSSForItem(typeID,sellSS)
-        return buyOrders[0][1] - sellOrders[0][1]
-
-        
